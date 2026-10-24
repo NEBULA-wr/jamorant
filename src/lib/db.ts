@@ -247,7 +247,7 @@ export function updateRaffleSettings(updates: Partial<RaffleSettings>): RaffleSe
     updated_at: new Date().toISOString()
   };
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: 'admin',
     action: 'UPDATE_SETTINGS',
     entity_type: 'raffle_settings',
@@ -256,6 +256,32 @@ export function updateRaffleSettings(updates: Partial<RaffleSettings>): RaffleSe
     created_at: new Date().toISOString()
   });
   localDbInstance.saveAll();
+
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('raffle_settings').upsert({
+      id: localDbInstance.settings.id,
+      name: localDbInstance.settings.name,
+      ticket_price: localDbInstance.settings.ticket_price,
+      closing_date: localDbInstance.settings.closing_date,
+      prize_1_title: localDbInstance.settings.prize_1_title,
+      prize_1_desc: localDbInstance.settings.prize_1_desc,
+      prize_1_img: localDbInstance.settings.prize_1_img,
+      prize_2_title: localDbInstance.settings.prize_2_title,
+      prize_2_desc: localDbInstance.settings.prize_2_desc,
+      prize_2_img: localDbInstance.settings.prize_2_img,
+      prize_3_title: localDbInstance.settings.prize_3_title,
+      prize_3_desc: localDbInstance.settings.prize_3_desc,
+      prize_3_img: localDbInstance.settings.prize_3_img,
+      rules: localDbInstance.settings.rules,
+      contact_phone: localDbInstance.settings.contact_phone,
+      contact_email: localDbInstance.settings.contact_email,
+      updated_at: localDbInstance.settings.updated_at
+    }).then(({ error }) => {
+      if (error) console.error('Error sincronizando configuración en Supabase:', error);
+    });
+  }
+
   return { ...localDbInstance.settings };
 }
 
@@ -321,6 +347,18 @@ export function getRaffleDraws(): RaffleDraw[] {
   return [...localDbInstance.draws].sort(
     (a, b) => new Date(b.drawn_at).getTime() - new Date(a.drawn_at).getTime()
   );
+}
+
+// Standard RFC4122 v4 UUID generator for full compatibility with PostgreSQL UUID and VARCHAR columns
+export function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 // ATOMIC RESERVATION FUNCTION
@@ -393,14 +431,14 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
   const now = new Date().toISOString();
   const recordedBy = params.recordedBy || 'Administrador';
 
-  // 1. Participant lookup or create
+  // 1. Participant lookup or create with genuine UUID
   const nameParts = nameToUse.split(' ').filter(Boolean);
   const firstName = nameParts[0] || (params.initialState === 'blocked' ? 'Bloqueo' : 'Participante');
   const lastName = nameParts.slice(1).join(' ') || (params.initialState === 'blocked' ? 'Administrativo' : '');
   const phone = (params.phone || '').trim();
 
   let participant: Participant = {
-    id: `part_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    id: generateUUID(),
     first_name: firstName,
     last_name: lastName,
     phone: phone || '',
@@ -409,8 +447,8 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
   };
   localDbInstance.participants.push(participant);
 
-  // 2. Reservation creation
-  const resId = `res_${params.ticketNumber}_${Date.now()}`;
+  // 2. Reservation creation with genuine UUID
+  const resId = generateUUID();
   const reservation: Reservation = {
     id: resId,
     ticket_id: ticket.id,
@@ -432,10 +470,11 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
     balance_due: ticketPrice - initialAmount
   };
 
-  // 3. Payment creation if amount > 0
+  // 3. Payment creation if amount > 0 with genuine UUID
+  let createdPayment: Payment | null = null;
   if (initialAmount > 0) {
-    const payment: Payment = {
-      id: `pay_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    createdPayment = {
+      id: generateUUID(),
       reservation_id: resId,
       ticket_number: params.ticketNumber,
       amount: initialAmount,
@@ -447,7 +486,7 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
       recorded_by: recordedBy,
       created_at: now
     };
-    localDbInstance.payments.push(payment);
+    localDbInstance.payments.push(createdPayment);
   }
 
   // 4. Update ticket
@@ -457,9 +496,9 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
 
   localDbInstance.reservations.push(reservation);
 
-  // 5. Audit Log
+  // 5. Audit Log with genuine UUID
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: recordedBy,
     action: 'RESERVE_TICKET',
     entity_type: 'ticket',
@@ -470,8 +509,8 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
 
   localDbInstance.saveAll();
 
-  // If Supabase is connected, sync asynchronously
-  await syncReservationToSupabase(reservation, participant, initialAmount, params.paymentMethod, params.paymentReference);
+  // If Supabase is connected, sync asynchronously with exact matching IDs
+  await syncReservationToSupabase(reservation, participant, createdPayment);
 
   return {
     success: true,
@@ -521,7 +560,7 @@ export async function registerPayment(params: AddPaymentParams): Promise<{
   const recordedBy = params.recordedBy || 'Administrador';
 
   const payment: Payment = {
-    id: `pay_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    id: generateUUID(),
     reservation_id: reservation.id,
     ticket_number: reservation.ticket_number,
     amount: amt,
@@ -566,7 +605,7 @@ export async function registerPayment(params: AddPaymentParams): Promise<{
 
   // Audit
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: recordedBy,
     action: 'REGISTER_PAYMENT',
     entity_type: 'payment',
@@ -576,6 +615,38 @@ export async function registerPayment(params: AddPaymentParams): Promise<{
   });
 
   localDbInstance.saveAll();
+
+  // Supabase sync for additional payment
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('payments').insert({
+      id: payment.id,
+      reservation_id: payment.reservation_id,
+      ticket_number: payment.ticket_number,
+      amount: payment.amount,
+      payment_method: payment.payment_method,
+      status: 'confirmed',
+      reference: payment.reference || null,
+      notes: payment.notes || null,
+      received_at: payment.received_at,
+      recorded_by: payment.recorded_by,
+      created_at: payment.created_at
+    }).then(({ error }) => {
+      if (error) console.error('Error insertando pago en Supabase:', error);
+    });
+
+    client.from('reservations').update({
+      status: newStatus,
+      updated_at: now
+    }).eq('id', reservation.id).then();
+
+    if (ticket) {
+      client.from('tickets').update({
+        status: newStatus,
+        updated_at: now
+      }).eq('id', ticket.id).then();
+    }
+  }
 
   return {
     success: true,
@@ -610,6 +681,8 @@ export async function reversePayment(paymentId: string, reason: string, recorded
 
   // Recalculate reservation
   const reservation = localDbInstance.reservations.find(r => r.id === payment.reservation_id);
+  let newStatus: TicketStatus = 'reserved';
+  let ticketToUpdate: Ticket | undefined;
   if (reservation) {
     const allConfirmed = localDbInstance.payments.filter(
       p => p.reservation_id === reservation.id && p.status === 'confirmed'
@@ -617,7 +690,7 @@ export async function reversePayment(paymentId: string, reason: string, recorded
     const totalPaid = allConfirmed.reduce((sum, p) => sum + p.amount, 0);
     const balanceDue = Math.max(0, reservation.total_price - totalPaid);
 
-    let newStatus: TicketStatus = reservation.status === 'cancelled' ? 'reserved' : (reservation.status as TicketStatus);
+    newStatus = reservation.status === 'cancelled' ? 'reserved' : (reservation.status as TicketStatus);
     if (balanceDue === 0) {
       newStatus = 'paid';
     } else if (totalPaid > 0) {
@@ -631,15 +704,15 @@ export async function reversePayment(paymentId: string, reason: string, recorded
     reservation.status = newStatus;
     reservation.updated_at = now;
 
-    const ticket = localDbInstance.tickets.find(t => t.id === reservation.ticket_id);
-    if (ticket) {
-      ticket.status = newStatus;
-      ticket.updated_at = now;
+    ticketToUpdate = localDbInstance.tickets.find(t => t.id === reservation.ticket_id);
+    if (ticketToUpdate) {
+      ticketToUpdate.status = newStatus;
+      ticketToUpdate.updated_at = now;
     }
   }
 
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: recordedBy,
     action: 'REVERSE_PAYMENT',
     entity_type: 'payment',
@@ -649,6 +722,29 @@ export async function reversePayment(paymentId: string, reason: string, recorded
   });
 
   localDbInstance.saveAll();
+
+  // Sync reversal to Supabase
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('payments').update({
+      status: 'reversed',
+      reversal_reason: reason.trim(),
+      reversed_at: now
+    }).eq('id', payment.id).then();
+
+    if (reservation) {
+      client.from('reservations').update({
+        status: newStatus,
+        updated_at: now
+      }).eq('id', reservation.id).then();
+    }
+    if (ticketToUpdate) {
+      client.from('tickets').update({
+        status: newStatus,
+        updated_at: now
+      }).eq('id', ticketToUpdate.id).then();
+    }
+  }
 
   return { success: true, message: 'Pago revertido y saldos recalculados correctamente.' };
 }
@@ -683,7 +779,7 @@ export async function cancelReservation(
   }
 
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: recordedBy,
     action: 'CANCEL_RESERVATION',
     entity_type: 'reservation',
@@ -693,6 +789,23 @@ export async function cancelReservation(
   });
 
   localDbInstance.saveAll();
+
+  // Sync cancellation to Supabase
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('reservations').update({
+      status: 'cancelled',
+      cancelled_at: now,
+      cancellation_reason: reason.trim() || 'Cancelación administrativa',
+      updated_at: now
+    }).eq('id', reservation.id).then();
+
+    client.from('tickets').update({
+      status: 'available',
+      reservation_id: null,
+      updated_at: now
+    }).eq('number', reservation.ticket_number).then();
+  }
 
   return {
     success: true,
@@ -802,7 +915,7 @@ export async function updateParticipant(
   });
 
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: recordedBy,
     action: 'UPDATE_PARTICIPANT',
     entity_type: 'participant',
@@ -812,6 +925,19 @@ export async function updateParticipant(
   });
 
   localDbInstance.saveAll();
+
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('participants').update({
+      first_name: part.first_name,
+      last_name: part.last_name,
+      phone: part.phone,
+      updated_at: part.updated_at
+    }).eq('id', participantId).then(({ error }) => {
+      if (error) console.error('Error actualizando participante en Supabase:', error);
+    });
+  }
+
   return { success: true, message: 'Datos de participante actualizados.' };
 }
 
@@ -925,7 +1051,7 @@ export async function confirmDrawWinner(params: ConfirmDrawWinnerParams): Promis
   const existingWinnerIdx = localDbInstance.winners.findIndex(w => w.prize_position === params.prizePosition);
 
   const winner: RaffleWinner = {
-    id: `winner_${params.prizePosition}_${Date.now()}`,
+    id: generateUUID(),
     ticket_id: ticket.id,
     ticket_number: params.winningTicketNumber,
     participant_name: participantName,
@@ -945,7 +1071,7 @@ export async function confirmDrawWinner(params: ConfirmDrawWinnerParams): Promis
   }
 
   const draw: RaffleDraw = {
-    id: `draw_${Date.now()}`,
+    id: generateUUID(),
     prize_position: params.prizePosition,
     eligible_ticket_ids: params.eligibleTicketNumbers,
     winning_ticket_id: params.winningTicketNumber,
@@ -962,7 +1088,7 @@ export async function confirmDrawWinner(params: ConfirmDrawWinnerParams): Promis
   localDbInstance.draws.push(draw);
 
   localDbInstance.auditLogs.unshift({
-    id: `audit_${Date.now()}`,
+    id: generateUUID(),
     user_id: confirmedBy,
     action: 'CONFIRM_DRAW_WINNER',
     entity_type: 'raffle_winner',
@@ -972,6 +1098,40 @@ export async function confirmDrawWinner(params: ConfirmDrawWinnerParams): Promis
   });
 
   localDbInstance.saveAll();
+
+  // Sync winner and draw to Supabase
+  const client = getSupabaseClient();
+  if (client) {
+    client.from('raffle_winners').upsert({
+      id: winner.id,
+      ticket_id: winner.ticket_id,
+      ticket_number: winner.ticket_number,
+      participant_name: winner.participant_name,
+      prize_position: winner.prize_position,
+      prize_title: winner.prize_title,
+      draw_date: winner.draw_date,
+      selection_method: winner.selection_method,
+      confirmed_at: winner.confirmed_at,
+      confirmed_by: winner.confirmed_by,
+      verification_code: winner.verification_code
+    }).then(({ error }) => {
+      if (error) console.error('Error sincronizando ganador con Supabase:', error);
+    });
+
+    client.from('raffle_draws').insert({
+      id: draw.id,
+      prize_position: draw.prize_position,
+      eligible_ticket_ids: draw.eligible_ticket_ids,
+      winning_ticket_id: draw.winning_ticket_id,
+      selection_method: draw.selection_method,
+      drawn_at: draw.drawn_at,
+      drawn_by: draw.drawn_by,
+      status: draw.status,
+      verification_data: JSON.parse(draw.verification_data)
+    }).then(({ error }) => {
+      if (error) console.error('Error sincronizando sorteo con Supabase:', error);
+    });
+  }
 
   return {
     success: true,
@@ -1017,7 +1177,7 @@ export async function clearDatabase(): Promise<{ success: boolean; message: stri
 export async function syncReservationToSupabase(
   reservation: Reservation,
   participant: Participant,
-  initialPaymentAmount: number,
+  paymentOrAmount?: Payment | number | null,
   paymentMethod?: PaymentMethod,
   reference?: string
 ) {
@@ -1069,19 +1229,37 @@ export async function syncReservationToSupabase(
       console.error('Error actualizando ticket en Supabase:', tickErr);
     }
 
-    // 4. Payment if initialPaymentAmount > 0
-    if (initialPaymentAmount > 0) {
+    // 4. Payment if payment object or amount > 0
+    if (paymentOrAmount && typeof paymentOrAmount === 'object') {
       const { error: payErr } = await client.from('payments').insert({
-        id: `pay_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        id: paymentOrAmount.id,
+        reservation_id: paymentOrAmount.reservation_id,
+        ticket_number: paymentOrAmount.ticket_number,
+        amount: paymentOrAmount.amount,
+        payment_method: paymentOrAmount.payment_method,
+        status: paymentOrAmount.status,
+        reference: paymentOrAmount.reference || null,
+        notes: paymentOrAmount.notes || 'Pago inicial registrado en reserva',
+        received_at: paymentOrAmount.received_at,
+        recorded_by: paymentOrAmount.recorded_by,
+        created_at: paymentOrAmount.created_at
+      });
+      if (payErr) {
+        console.error('Error insertando pago en Supabase:', payErr);
+      }
+    } else if (typeof paymentOrAmount === 'number' && paymentOrAmount > 0) {
+      const { error: payErr } = await client.from('payments').insert({
+        id: generateUUID(),
         reservation_id: reservation.id,
         ticket_number: reservation.ticket_number,
-        amount: initialPaymentAmount,
+        amount: paymentOrAmount,
         payment_method: paymentMethod || 'cash',
         status: 'confirmed',
         reference: reference || null,
         notes: 'Pago inicial registrado en reserva',
         received_at: new Date().toISOString(),
-        recorded_by: reservation.created_by
+        recorded_by: reservation.created_by,
+        created_at: new Date().toISOString()
       });
       if (payErr) {
         console.error('Error insertando pago en Supabase:', payErr);
