@@ -1,0 +1,6 @@
+{
+  "name": "RIFA COURT — Sistema Profesional de Rifas Deportivas",
+  "description": "Sistema profesional de rifa deportiva con cuadrícula de 300 números, control de abonos, ruleta animada, reportes y generador de tickets en PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
