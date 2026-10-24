@@ -471,7 +471,7 @@ export async function reserveTicket(params: ReserveTicketParams): Promise<{
   localDbInstance.saveAll();
 
   // If Supabase is connected, sync asynchronously
-  syncReservationToSupabase(reservation, participant, initialAmount, params.paymentMethod, params.paymentReference);
+  await syncReservationToSupabase(reservation, participant, initialAmount, params.paymentMethod, params.paymentReference);
 
   return {
     success: true,
@@ -1013,8 +1013,8 @@ export async function clearDatabase(): Promise<{ success: boolean; message: stri
   };
 }
 
-// Background sync helper to Supabase if connected
-async function syncReservationToSupabase(
+// Sync reservation and participant to Supabase
+export async function syncReservationToSupabase(
   reservation: Reservation,
   participant: Participant,
   initialPaymentAmount: number,
@@ -1022,21 +1022,27 @@ async function syncReservationToSupabase(
   reference?: string
 ) {
   const client = getSupabaseClient();
-  if (!client) return;
+  if (!client) {
+    console.warn('Supabase no está configurado. La reserva se guardó únicamente en local.');
+    return;
+  }
 
   try {
     // 1. Participant
-    await client.from('participants').upsert({
+    const { error: partErr } = await client.from('participants').upsert({
       id: participant.id,
       first_name: participant.first_name,
-      last_name: participant.last_name,
-      phone: participant.phone,
+      last_name: participant.last_name || '',
+      phone: participant.phone || '',
       created_at: participant.created_at,
       updated_at: participant.updated_at
     });
+    if (partErr) {
+      console.error('Error insertando participante en Supabase:', partErr);
+    }
 
     // 2. Reservation
-    await client.from('reservations').upsert({
+    const { error: resErr } = await client.from('reservations').upsert({
       id: reservation.id,
       ticket_id: reservation.ticket_id,
       ticket_number: reservation.ticket_number,
@@ -1049,27 +1055,238 @@ async function syncReservationToSupabase(
       created_at: reservation.created_at,
       updated_at: reservation.updated_at
     });
+    if (resErr) {
+      console.error('Error insertando reserva en Supabase:', resErr);
+    }
 
     // 3. Ticket status
-    await client.from('tickets').update({
+    const { error: tickErr } = await client.from('tickets').update({
       status: reservation.status,
       reservation_id: reservation.id,
       updated_at: new Date().toISOString()
     }).eq('number', reservation.ticket_number);
+    if (tickErr) {
+      console.error('Error actualizando ticket en Supabase:', tickErr);
+    }
 
-    // 4. Payment if any
+    // 4. Payment if initialPaymentAmount > 0
     if (initialPaymentAmount > 0) {
-      await client.from('payments').insert({
+      const { error: payErr } = await client.from('payments').insert({
+        id: `pay_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
         reservation_id: reservation.id,
+        ticket_number: reservation.ticket_number,
         amount: initialPaymentAmount,
         payment_method: paymentMethod || 'cash',
         status: 'confirmed',
         reference: reference || null,
+        notes: 'Pago inicial registrado en reserva',
         received_at: new Date().toISOString(),
         recorded_by: reservation.created_by
       });
+      if (payErr) {
+        console.error('Error insertando pago en Supabase:', payErr);
+      }
     }
+    console.log(`[Supabase] Boleta #${reservation.ticket_number} sincronizada exitosamente con la nube.`);
   } catch (err) {
-    console.warn('Could not sync to Supabase (offline/table missing):', err);
+    console.error('Excepción crítica sincronizando reserva con Supabase:', err);
+  }
+}
+
+// Descargar todos los datos desde Supabase a memoria local (para otros dispositivos o pestañas)
+export async function pullRemoteDataFromSupabase(): Promise<boolean> {
+  const client = getSupabaseClient();
+  if (!client) return false;
+
+  try {
+    // 1. Obtener los 300 tickets
+    const { data: remoteTickets, error: ticketsErr } = await client
+      .from('tickets')
+      .select('*')
+      .order('number', { ascending: true });
+
+    if (ticketsErr) {
+      console.warn('Error obteniendo tickets de Supabase:', ticketsErr);
+      return false;
+    }
+
+    // 2. Participantes
+    const { data: remoteParts } = await client.from('participants').select('*');
+
+    // 3. Reservas
+    const { data: remoteRes } = await client.from('reservations').select('*');
+
+    // 4. Pagos
+    const { data: remotePayments } = await client.from('payments').select('*');
+
+    // 5. Ganadores
+    const { data: remoteWinners } = await client.from('raffle_winners').select('*');
+
+    // 6. Configuración
+    const { data: remoteSettings } = await client
+      .from('raffle_settings')
+      .select('*')
+      .eq('id', 'court_raffle_2026')
+      .maybeSingle();
+
+    // Actualizar base local con datos remotos
+    if (remoteTickets && remoteTickets.length > 0) {
+      localDbInstance.tickets = remoteTickets.map((t: any) => ({
+        id: t.id,
+        number: Number(t.number),
+        formatted_number: formatTicketNumber(Number(t.number)),
+        status: t.status as TicketStatus,
+        reservation_id: t.reservation_id || null,
+        created_at: t.created_at,
+        updated_at: t.updated_at
+      }));
+    }
+
+    if (remoteParts) {
+      localDbInstance.participants = remoteParts.map((p: any) => ({
+        id: p.id,
+        first_name: p.first_name,
+        last_name: p.last_name || '',
+        phone: p.phone || '',
+        created_at: p.created_at,
+        updated_at: p.updated_at
+      }));
+    }
+
+    if (remoteRes) {
+      const partMap = new Map((localDbInstance.participants || []).map(p => [p.id, p]));
+      localDbInstance.reservations = remoteRes.map((r: any) => ({
+        id: r.id,
+        ticket_id: r.ticket_id,
+        ticket_number: Number(r.ticket_number),
+        participant_id: r.participant_id,
+        participant: partMap.get(r.participant_id),
+        total_price: Number(r.total_price),
+        status: r.status as TicketStatus,
+        reserved_at: r.reserved_at,
+        expires_at: r.expires_at || null,
+        notes: r.notes || undefined,
+        created_by: r.created_by,
+        cancelled_at: r.cancelled_at || null,
+        cancellation_reason: r.cancellation_reason || undefined,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        total_paid: 0,
+        balance_due: Number(r.total_price)
+      }));
+    }
+
+    if (remotePayments) {
+      localDbInstance.payments = remotePayments.map((p: any) => ({
+        id: p.id,
+        reservation_id: p.reservation_id,
+        ticket_number: p.ticket_number ? Number(p.ticket_number) : undefined,
+        amount: Number(p.amount),
+        payment_method: p.payment_method,
+        status: p.status,
+        reference: p.reference || undefined,
+        notes: p.notes || undefined,
+        received_at: p.received_at,
+        recorded_by: p.recorded_by,
+        reversal_reason: p.reversal_reason || undefined,
+        reversed_at: p.reversed_at || undefined,
+        created_at: p.created_at
+      }));
+
+      // Recalcular saldos de reservas
+      localDbInstance.reservations.forEach(r => {
+        const pList = localDbInstance.payments.filter(
+          p => p.reservation_id === r.id && p.status === 'confirmed'
+        );
+        const paid = pList.reduce((sum, p) => sum + p.amount, 0);
+        r.total_paid = paid;
+        r.balance_due = Math.max(0, r.total_price - paid);
+      });
+    }
+
+    if (remoteWinners) {
+      localDbInstance.winners = remoteWinners.map((w: any) => ({
+        id: w.id,
+        ticket_id: w.ticket_id,
+        ticket_number: Number(w.ticket_number),
+        participant_name: w.participant_name || 'Participante RIFA COURT',
+        prize_position: Number(w.prize_position) as PrizePosition,
+        prize_title: w.prize_title,
+        draw_date: w.draw_date,
+        selection_method: w.selection_method,
+        confirmed_at: w.confirmed_at,
+        confirmed_by: w.confirmed_by,
+        verification_code: w.verification_code
+      }));
+    }
+
+    if (remoteSettings) {
+      localDbInstance.settings = {
+        ...localDbInstance.settings,
+        name: remoteSettings.name || localDbInstance.settings.name,
+        ticket_price: Number(remoteSettings.ticket_price) || localDbInstance.settings.ticket_price,
+        closing_date: remoteSettings.closing_date || localDbInstance.settings.closing_date,
+        prize_1_title: remoteSettings.prize_1_title || localDbInstance.settings.prize_1_title,
+        prize_1_desc: remoteSettings.prize_1_desc || localDbInstance.settings.prize_1_desc,
+        prize_1_img: remoteSettings.prize_1_img || localDbInstance.settings.prize_1_img,
+        prize_2_title: remoteSettings.prize_2_title || localDbInstance.settings.prize_2_title,
+        prize_2_desc: remoteSettings.prize_2_desc || localDbInstance.settings.prize_2_desc,
+        prize_2_img: remoteSettings.prize_2_img || localDbInstance.settings.prize_2_img,
+        prize_3_title: remoteSettings.prize_3_title || localDbInstance.settings.prize_3_title,
+        prize_3_desc: remoteSettings.prize_3_desc || localDbInstance.settings.prize_3_desc,
+        prize_3_img: remoteSettings.prize_3_img || localDbInstance.settings.prize_3_img,
+        rules: remoteSettings.rules || localDbInstance.settings.rules,
+        contact_phone: remoteSettings.contact_phone || localDbInstance.settings.contact_phone,
+        contact_email: remoteSettings.contact_email || localDbInstance.settings.contact_email,
+        updated_at: remoteSettings.updated_at || new Date().toISOString()
+      };
+    }
+
+    localDbInstance.saveAll();
+    notifyListeners();
+    console.log('[Supabase] Datos sincronizados correctamente desde la nube.');
+    return true;
+  } catch (err) {
+    console.error('Error sincronizando datos desde Supabase:', err);
+    return false;
+  }
+}
+
+// Escuchar cambios en tiempo real desde Supabase para sincronizar entre varios dispositivos
+export function setupSupabaseRealtime(): (() => void) | null {
+  const client = getSupabaseClient();
+  if (!client) return null;
+
+  try {
+    const channel = client
+      .channel('court_raffle_realtime_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+        pullRemoteDataFromSupabase();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, () => {
+        pullRemoteDataFromSupabase();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => {
+        pullRemoteDataFromSupabase();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'participants' }, () => {
+        pullRemoteDataFromSupabase();
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[Supabase Realtime] Canal activo y escuchando eventos.');
+        }
+      });
+
+    return () => {
+      try {
+        client.removeChannel(channel);
+      } catch (e) {
+        // ignore
+      }
+    };
+  } catch (err) {
+    console.warn('No se pudo iniciar el canal de Realtime:', err);
+    return null;
   }
 }

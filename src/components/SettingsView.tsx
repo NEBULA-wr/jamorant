@@ -20,6 +20,7 @@ import {
   clearDatabase, 
   getAllAuditLogs, 
   getRaffleSettings, 
+  pullRemoteDataFromSupabase,
   updateRaffleSettings 
 } from '../lib/db';
 import { 
@@ -92,75 +93,241 @@ export const SettingsView: React.FC = () => {
     const res = await testSupabaseConnection(supabaseUrl.trim(), supabaseKey.trim());
     setTestResult(res);
     setIsTesting(false);
+
+    if (res.success) {
+      saveStoredSupabaseConfig(supabaseUrl.trim(), supabaseKey.trim());
+      await pullRemoteDataFromSupabase();
+    }
   };
 
-  const handleSaveSupabaseConfig = () => {
+  const handleSaveSupabaseConfig = async () => {
     saveStoredSupabaseConfig(supabaseUrl, supabaseKey);
     setSaveSuccess(true);
+    await pullRemoteDataFromSupabase();
   };
 
   const handleCopySql = () => {
-    const sql = `-- ESQUEMA RIFA COURT POSTGRESQL (SUPABASE)
-CREATE TABLE IF NOT EXISTS raffle_settings (
-  id VARCHAR(50) PRIMARY KEY DEFAULT 'court_raffle_2026',
-  name VARCHAR(255) NOT NULL,
-  ticket_price NUMERIC(10,2) NOT NULL DEFAULT 200.00,
-  currency VARCHAR(10) NOT NULL DEFAULT 'DOP',
-  total_tickets INTEGER NOT NULL DEFAULT 300,
-  status VARCHAR(20) NOT NULL DEFAULT 'active',
-  closing_date DATE NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+    const sql = `-- ====================================================================
+-- RIFA COURT — ESQUEMA COMPLETO Y CORREGIDO DE BASE DE DATOS (SUPABASE)
+-- Sistema Profesional de Rifas Deportivas (300 Números)
+-- Compatible al 100% con Frontend Web / Netlify / Dispositivos Móviles
+-- ====================================================================
 
-CREATE TABLE IF NOT EXISTS tickets (
-  id VARCHAR(50) PRIMARY KEY,
-  number INTEGER NOT NULL UNIQUE CHECK (number >= 1 AND number <= 300),
-  status VARCHAR(20) NOT NULL DEFAULT 'available',
-  reservation_id UUID DEFAULT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS raffle_settings (
+    id VARCHAR(100) PRIMARY KEY DEFAULT 'court_raffle_2026',
+    name VARCHAR(255) NOT NULL DEFAULT 'RIFA COURT — Gran Sorteo Deportivo',
+    ticket_price NUMERIC(10, 2) NOT NULL DEFAULT 200.00 CHECK (ticket_price > 0),
+    currency VARCHAR(10) NOT NULL DEFAULT 'DOP',
+    currency_symbol VARCHAR(10) NOT NULL DEFAULT 'RD$',
+    total_tickets INTEGER NOT NULL DEFAULT 300 CHECK (total_tickets = 300),
+    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed', 'drawn')),
+    closing_date DATE NOT NULL DEFAULT (CURRENT_DATE + INTERVAL '15 days'),
+    prize_1_title VARCHAR(255) NOT NULL DEFAULT '1ER LUGAR • TENIS DE BASKET',
+    prize_1_desc TEXT NOT NULL DEFAULT 'Tenis deportivos profesionales de baloncesto edición especial tigre negro y naranja.',
+    prize_1_img TEXT NOT NULL DEFAULT '/images/tenis.png',
+    prize_2_title VARCHAR(255) NOT NULL DEFAULT '2DO LUGAR • BALÓN OFICIAL',
+    prize_2_desc TEXT NOT NULL DEFAULT 'Balón oficial Molten BG4500 FIBA Approved de 12 paneles.',
+    prize_2_img TEXT NOT NULL DEFAULT '/images/balon.png',
+    prize_3_title VARCHAR(255) NOT NULL DEFAULT '3ER LUGAR • PAQUETE DE MEDIAS',
+    prize_3_desc TEXT NOT NULL DEFAULT 'Paquete de medias deportivas de baloncesto en blanco y negro.',
+    prize_3_img TEXT NOT NULL DEFAULT '/images/medias.png',
+    rules TEXT NOT NULL DEFAULT '1. Solo participarán en la canasta los tickets 100% pagados.\\n2. Cada ticket solo puede ganar un premio.',
+    reservation_timeout_hours INTEGER NOT NULL DEFAULT 48 CHECK (reservation_timeout_hours >= 1),
+    prevent_duplicate_winner BOOLEAN NOT NULL DEFAULT TRUE,
+    contact_phone VARCHAR(50) DEFAULT '+1 (829) 555-2478',
+    contact_email VARCHAR(100) DEFAULT 'contacto@rifacourt.com',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS participants (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  first_name VARCHAR(100) NOT NULL,
-  last_name VARCHAR(100) NOT NULL,
-  phone VARCHAR(50) NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id VARCHAR(100) PRIMARY KEY,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) DEFAULT '',
+    phone VARCHAR(50) DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_participants_name ON participants(first_name, last_name);
+
+CREATE TABLE IF NOT EXISTS tickets (
+    id VARCHAR(100) PRIMARY KEY,
+    number INTEGER NOT NULL UNIQUE CHECK (number >= 1 AND number <= 300),
+    status VARCHAR(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'reserved', 'partial', 'paid', 'blocked')),
+    reservation_id VARCHAR(100) DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_number ON tickets(number);
+CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 
 CREATE TABLE IF NOT EXISTS reservations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  ticket_id VARCHAR(50) NOT NULL REFERENCES tickets(id),
-  ticket_number INTEGER NOT NULL,
-  participant_id UUID NOT NULL REFERENCES participants(id),
-  total_price NUMERIC(10,2) NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'reserved',
-  reserved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  notes TEXT,
-  created_by VARCHAR(100) NOT NULL DEFAULT 'Administrador'
+    id VARCHAR(100) PRIMARY KEY,
+    ticket_id VARCHAR(100) NOT NULL REFERENCES tickets(id) ON DELETE RESTRICT,
+    ticket_number INTEGER NOT NULL CHECK (ticket_number >= 1 AND ticket_number <= 300),
+    participant_id VARCHAR(100) NOT NULL REFERENCES participants(id) ON DELETE RESTRICT,
+    total_price NUMERIC(10, 2) NOT NULL CHECK (total_price > 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'reserved' CHECK (status IN ('reserved', 'partial', 'paid', 'cancelled', 'blocked')),
+    reserved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ DEFAULT NULL,
+    notes TEXT DEFAULT NULL,
+    created_by VARCHAR(100) NOT NULL DEFAULT 'Administrador',
+    cancelled_at TIMESTAMPTZ DEFAULT NULL,
+    cancellation_reason TEXT DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_reservations_ticket_id ON reservations(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_participant_id ON reservations(participant_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
 
 CREATE TABLE IF NOT EXISTS payments (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  reservation_id UUID NOT NULL REFERENCES reservations(id),
-  amount NUMERIC(10,2) NOT NULL,
-  payment_method VARCHAR(20) NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'confirmed',
-  reference VARCHAR(100),
-  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  recorded_by VARCHAR(100) NOT NULL
+    id VARCHAR(100) PRIMARY KEY,
+    reservation_id VARCHAR(100) NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+    ticket_number INTEGER DEFAULT NULL,
+    amount NUMERIC(10, 2) NOT NULL CHECK (amount > 0),
+    payment_method VARCHAR(20) NOT NULL CHECK (payment_method IN ('cash', 'transfer', 'deposit', 'other')),
+    status VARCHAR(20) NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'reversed')),
+    reference VARCHAR(100) DEFAULT NULL,
+    notes TEXT DEFAULT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    recorded_by VARCHAR(100) NOT NULL DEFAULT 'Administrador',
+    reversal_reason TEXT DEFAULT NULL,
+    reversed_at TIMESTAMPTZ DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payments_reservation ON payments(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+
+CREATE TABLE IF NOT EXISTS raffle_draws (
+    id VARCHAR(100) PRIMARY KEY,
+    prize_position INTEGER NOT NULL CHECK (prize_position IN (1, 2, 3)),
+    eligible_ticket_ids INTEGER[] NOT NULL,
+    winning_ticket_id INTEGER NOT NULL CHECK (winning_ticket_id >= 1 AND winning_ticket_id <= 300),
+    selection_method VARCHAR(50) NOT NULL DEFAULT 'ruleta_animada_criptografica',
+    drawn_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    drawn_by VARCHAR(100) NOT NULL DEFAULT 'Administrador Oficial',
+    status VARCHAR(20) NOT NULL DEFAULT 'confirmed',
+    verification_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    notes TEXT DEFAULT NULL
 );
 
--- GENERAR 300 TICKETS
+CREATE TABLE IF NOT EXISTS raffle_winners (
+    id VARCHAR(100) PRIMARY KEY,
+    ticket_id VARCHAR(100) NOT NULL REFERENCES tickets(id) ON DELETE RESTRICT,
+    ticket_number INTEGER NOT NULL CHECK (ticket_number >= 1 AND ticket_number <= 300),
+    prize_position INTEGER NOT NULL UNIQUE CHECK (prize_position IN (1, 2, 3)),
+    prize_title VARCHAR(255) NOT NULL,
+    draw_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    selection_method VARCHAR(50) NOT NULL,
+    confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_by VARCHAR(100) NOT NULL,
+    verification_code VARCHAR(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id VARCHAR(100) NOT NULL,
+    details TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Generar 300 boletas limpias
 DO $$
 BEGIN
-  FOR i IN 1..300 LOOP
-    INSERT INTO tickets (id, number, status)
-    VALUES ('ticket_' || i, i, 'available')
-    ON CONFLICT (number) DO NOTHING;
-  END LOOP;
+    FOR i IN 1..300 LOOP
+        INSERT INTO tickets (id, number, status, created_at, updated_at)
+        VALUES ('ticket_' || i, i, 'available', NOW(), NOW())
+        ON CONFLICT (number) DO NOTHING;
+    END LOOP;
 END $$;
+
+INSERT INTO raffle_settings (id, name, ticket_price, closing_date)
+VALUES ('court_raffle_2026', 'RIFA COURT — Gran Sorteo Deportivo', 200.00, CURRENT_DATE + INTERVAL '15 days')
+ON CONFLICT (id) DO NOTHING;
+
+-- Políticas de RLS abiertas para anon y authenticated
+ALTER TABLE raffle_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE participants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raffle_draws ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raffle_winners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all raffle_settings" ON raffle_settings;
+CREATE POLICY "Allow all raffle_settings" ON raffle_settings FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all tickets" ON tickets;
+CREATE POLICY "Allow all tickets" ON tickets FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all participants" ON participants;
+CREATE POLICY "Allow all participants" ON participants FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all reservations" ON reservations;
+CREATE POLICY "Allow all reservations" ON reservations FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all payments" ON payments;
+CREATE POLICY "Allow all payments" ON payments FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all draws" ON raffle_draws;
+CREATE POLICY "Allow all draws" ON raffle_draws FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all winners" ON raffle_winners;
+CREATE POLICY "Allow all winners" ON raffle_winners FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all audit_logs" ON audit_logs;
+CREATE POLICY "Allow all audit_logs" ON audit_logs FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION delete_ticket_individual(
+    p_ticket_number INTEGER,
+    p_user VARCHAR DEFAULT 'Administrador'
+)
+RETURNS JSONB LANGUAGE plpgsql AS $$
+DECLARE
+    v_res_id VARCHAR;
+    v_ticket_id VARCHAR;
+BEGIN
+    SELECT id, reservation_id INTO v_ticket_id, v_res_id FROM tickets WHERE number = p_ticket_number FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('success', false, 'message', 'El ticket no existe.');
+    END IF;
+    UPDATE tickets SET status = 'available', reservation_id = NULL, updated_at = NOW() WHERE number = p_ticket_number;
+    DELETE FROM raffle_winners WHERE ticket_number = p_ticket_number;
+    IF v_res_id IS NOT NULL THEN
+        DELETE FROM payments WHERE reservation_id = v_res_id;
+        DELETE FROM reservations WHERE id = v_res_id;
+    ELSE
+        DELETE FROM payments WHERE reservation_id IN (SELECT id FROM reservations WHERE ticket_number = p_ticket_number);
+        DELETE FROM reservations WHERE ticket_number = p_ticket_number;
+    END IF;
+    INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details)
+    VALUES ('audit_' || EXTRACT(EPOCH FROM NOW())::TEXT, p_user, 'DELETE_TICKET_INDIVIDUAL', 'ticket', p_ticket_number::text, 'Ticket #' || LPAD(p_ticket_number::text, 3, '0') || ' eliminado individualmente y restaurado a DISPONIBLE.');
+    RETURN jsonb_build_object('success', true, 'message', 'Ticket #' || LPAD(p_ticket_number::text, 3, '0') || ' eliminado y liberado exitosamente.');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION reset_raffle_court()
+RETURNS JSONB LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE tickets SET status = 'available', reservation_id = NULL, updated_at = NOW();
+    DELETE FROM payments;
+    DELETE FROM raffle_winners;
+    DELETE FROM raffle_draws;
+    DELETE FROM reservations;
+    DELETE FROM participants;
+    DELETE FROM audit_logs;
+    INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details)
+    VALUES ('audit_reset_' || EXTRACT(EPOCH FROM NOW())::TEXT, 'admin', 'RESET_RAFFLE', 'system', 'all', 'Reinicio total de la rifa: todos los 300 tickets restablecidos.');
+    RETURN jsonb_build_object('success', true, 'message', 'Rifa reiniciada exitosamente.');
+END;
+$$;
 `;
     navigator.clipboard.writeText(sql);
     setCopiedSql(true);
@@ -488,6 +655,23 @@ END $$;
                 >
                   Guardar Supabase
                 </button>
+              </div>
+
+              {/* Ayuda Netlify multi-dispositivo */}
+              <div className="p-3 rounded-xl bg-orange-950/30 border border-orange-500/40 text-[11px] text-orange-200 space-y-1.5 mt-2">
+                <span className="font-bold flex items-center gap-1.5 text-orange-400">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Sincronización multi-dispositivo en Netlify:
+                </span>
+                <p className="text-slate-300">
+                  Para que las reservas se sincronicen automáticamente entre todos los celulares y computadoras:
+                </p>
+                <div className="bg-black/50 p-2 rounded border border-slate-800 font-mono text-[10px] space-y-1 text-slate-300">
+                  <div>1. En Netlify ve a: <span className="text-orange-400">Site configuration &rarr; Environment variables</span></div>
+                  <div>2. Agrega: <span className="text-emerald-400 font-bold">VITE_SUPABASE_URL</span> con tu Project URL</div>
+                  <div>3. Agrega: <span className="text-emerald-400 font-bold">VITE_SUPABASE_ANON_KEY</span> con tu Anon Key</div>
+                  <div>4. En <span className="text-orange-400">Deploys</span> haz clic en <span className="text-white font-bold">Trigger deploy &rarr; Deploy site</span></div>
+                </div>
               </div>
             </div>
           </div>

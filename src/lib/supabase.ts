@@ -1,7 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const STORAGE_KEY_URL = 'rifa_court_supabase_url';
-const STORAGE_KEY_ANON = 'rifa_court_supabase_anon_key';
+const STORAGE_KEY_URL = 'https://ctaxasmbtcteubfdrrde.supabase.co';
+const STORAGE_KEY_ANON = 'sb_publishable_DDmaNIITKm8GwVgGzjrhzg_SWEaZuw1';
 
 export function getStoredSupabaseConfig(): { url: string; anonKey: string } {
   const envUrl = import.meta.env.VITE_SUPABASE_URL || '';

@@ -23,6 +23,8 @@ import {
   getAllTickets, 
   getFinancialStats, 
   getRaffleSettings, 
+  pullRemoteDataFromSupabase,
+  setupSupabaseRealtime,
   subscribeToDatabase 
 } from './lib/db';
 import { getSupabaseClient } from './lib/supabase';
@@ -66,7 +68,7 @@ export default function App() {
   // Success toast notification
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
-  // Subscribe to reactive database changes
+  // Subscribe to reactive database changes & sync with Supabase
   useEffect(() => {
     const unsubscribe = subscribeToDatabase(() => {
       setSettings(getRaffleSettings());
@@ -74,20 +76,18 @@ export default function App() {
       setStats(getFinancialStats());
     });
 
-    // Check Supabase status
-    const client = getSupabaseClient();
-    if (client) {
-      client.from('raffle_settings').select('id').limit(1).then(
-        ({ error }) => {
-          setIsSupabaseLive(!error);
-        },
-        () => {
-          setIsSupabaseLive(false);
-        }
-      );
-    }
+    // Pull real-time data from Supabase
+    pullRemoteDataFromSupabase().then((connected) => {
+      setIsSupabaseLive(connected);
+    });
 
-    return () => unsubscribe();
+    // Listen to real-time events across multiple devices
+    const cleanupRealtime = setupSupabaseRealtime();
+
+    return () => {
+      unsubscribe();
+      if (cleanupRealtime) cleanupRealtime();
+    };
   }, []);
 
   const showNotification = (msg: string) => {
